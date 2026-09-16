@@ -218,13 +218,213 @@ class App(Gtk.Application):
         # Honestly, being privileged with AI coding has made me realize coding is actually hard.
         # It gets to everyone at some point in time. Look at Google, they just use AI for the entirety of google3. Sad.
     def on_edit(self, btn, k):
-       if not self.pad:
-          self.say("connect FIRST"); return
-       def go():
-          try:
-             with self.lock:
-                for k in range(6):
-                   self.pad.set(k, self.slots[k])
-             self.say("pushed 6 slots")
-          except Exception as e:
-              self.say(f"push failed: {e}")
+        if not self.pad:
+            self.say("connect FIRST"); return
+        def go():
+            try:
+                with self.lock:
+                    for k in range(6):
+                        self.pad.set(k, self.slots[k])
+                self.say("pushed 6 slots")
+            except Exception as e:
+                self.say(f"push failed: {e}")
+        self.bg(go)
+
+    def on_oled(self, *a):
+        if not self.pad:
+            self.say("connect first"); return
+        mode = self.oled_modes[self.oled_combo.get_selected()]
+        l1, l2 = self.l1.get_text(), self.l2.get_text()
+        def go():
+            try:
+                with self.lock:
+                    self.pad.oled(mode)
+                    self.pad.live(clock=now_clock(), l1=l1, l2=l2)
+                self.say(f"oled set to {mode}")
+            except Exception as e:
+                self.say(f"oled failed: {e}")
+        self.bg(go)
+    def on_live(self, btn):
+        self.live_on = btn.get_active()
+        btn.set_label(f"background live: {'on' if self.live_on else 'off'}")
+        if self.live_on and not (self.live_thread and self.live_thread.is_alive)():
+            self.live_thread = threading.Thread(target=self.live_loop, daemon=True)
+            self.live_thread.start() 
+
+    def live_loop(self):
+        while self.live_on:
+            try:
+                now = datetime.datetime.now()
+                cpu, mem = cpu_mem()
+                with self.lock:
+                    if self.pad:          # Wow, I knew I was bad at dates. But I didn't know I was bad at dates in progamming either.
+                        self.pad.live(clock=now.strftime("%H:%M"), date=now.strftime("%Y-%m-%d"), 
+                                      l1=self.l1.get_text() or "GacroPad", l2=self.l2.get_text())
+                        if cpu >= 0:
+                            self.pad.stats(cpu, mem)
+            except Exception as e:
+                    self.say(f"live: {e}")
+            time.sleep(2)
+
+    def on_flash(self *a):
+        port = dd_text(self.port_combo)
+        url = self.url.get_text().strip() # nekked
+        if not port or port == "none found":
+            return
+        def log(msg):
+            buf = self.flog.get_buffer()
+            GLib.idle_add(buf.insert_at_cursor, str(msg) + "\n")
+        def go():
+            try:
+                path = "/tmp/gacropad.bin"
+                gacro.download_bin(url, path, log)
+                gacro.flash_first(port, path, log)
+            except Exception as e:
+                log(f"FAILED: {e}")
+        self.bg(go)
+
+
+def now_clock():
+    return datetime.datetime.now().strftime("%H:%M")
+
+class KeyDialog(Gtk.Dialog):
+    def __init__(self, app, k):
+        super().__init__(title=f"key K{k+1}", transient_for=app.get_active_window(), modal=True)
+        self.app, self.k = app, k
+        self.slot = json.loads(json.dumps(json.dumps(app.slots[k]))) # how it feels to cook and burn down the kitchen
+        self.recording = False
+        self.last_t = 0
+        self.held = {}
+        box = self.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_top(10); box.set_margin_bottom(10)
+        box.set_margin_start(12); box.set_margin_end(12)
+
+        self.label_entry = Gtk.Entry(text=self.slot.get("label", ""))
+        box.append(Gtk.Label(label="label: (shows on oled)", xalign=0))
+        box.append(self.label_entry)
+
+        self.steps_label = Gtk.Label(xalign=0, wrap=True)
+        box.append(Gtk.ScrolledWindow(child=self.steps_label, min_content_height=120, vexpand=True))
+        self.draw_steps()
+
+        rrow = Gtk.Box(spacing=6)
+        self.rec_btn = Gtk.Button(label="record")
+        self.rec_btn.connect("clicked", self.on_rec)
+        rrow.append(self.rec_btn)
+        clr = Gtk.Button(label="clear")
+        clr.connect("clicked", lambda *a: (self.slot.__setitem__("steps", []), self.draw_steps))
+        rrow.append(clr)
+        self.preset = Gtk.DropDown.new_from_strings(list(PRESETS))
+        rrow.append(self.preset)
+        ins = Gtk.Button(label="insert preset")
+        ins.connect("clicked", self.on_preset)
+        rrow.append(ins)
+        box.append(rrow)
+        box.append(Gtk.Label(label="while recording, do your action. esc stops.", xalign=0))
+
+        ctl = Gtk.EventControllerKey()
+        ctl.connect("key-pressed", self.on_key, True)
+        ctl.connect("key-released", self.on_key, False)
+        self.add_controller(ctl)
+
+        self.add_button("test fire", 10)
+        self.add_button("cancel", Gtk.ResponseType.CANCEL)
+        self.add_button("save to pad", Gtk.ResponseType.OK)
+        self.connect("response", self.on_resp)
+        self.present()
+
+    def draw_steps(self):
+        s = self.slot
+        self.steps_label.set_text(f"{len(s['steps'])} steps: {summarize(s)}")
+
+    def on_preset(self, *a):
+        name = dd_text(self.preset)
+        if not name:
+            return
+        for kind, v in PRESETS[name]:
+            if kind == "media":
+                self.slot["steps"].append({"t": "media", "v": v, "hold": 120})
+            else:
+                self.slot["steps"].extend([{"t": "down", "v": v}, {"t": "up", "v": v}])
+        self.draw_steps()
+
+    def on_rec(self, *a):
+        self.recording = not self.recording
+        self.rec_btn.set_label("stop" if self.recording else "record")
+        self.last_t = time.monotonic()
+
+    def on_key(self, ctl, keyval, keycode, state, pressed):
+        if not self.recording:
+            return False
+        if keyval == Gdk.KEY_Escape and pressed:
+            self.on_rec()
+            return True
+        kind, v = keyval_step(keyval)
+        if kind is None:
+            return True # I don't know what this key is. I'm hungry, so I'll just eat it. 
+        now = time.monotonic()
+        gap = int((now - self.last_t) * 1000)
+        self.last_t = now
+        if pressed:
+            if v in self.held: 
+                return True # Key repeat. So just ignore it. Very particular edge case, but it probably will happen. I can't say the same.
+            self.held[v] = now
+            if gap > 25:
+                self.slot["steps"].append({"t": "delay", "ms": min(gap, 2000)})
+            if kind == "media":
+                self.slot["steps"].append({"t": "media", "v": v, "hold": 120})
+            else:
+                self.slot["steps"].append({"t": "down", "v": v})
+        else:
+            start = self.held.pop(v, None)
+            if kind == "media" or start is None:
+                pass
+            else:
+                hold = int((now - start) * 1000)
+                # This next line will sure work great
+                if hold < 500 and self.slot["steps"] and self.slot["steps"][-1] == {"t": "down", "v": v} \
+                        and (len(self.slot["steps"]) < 2 or self.slot["steps"][-2].get("t") != "delay"):
+                    self.slot["steps"][-1] = {"t": "key", "v": v, "hold": max(hold, 20)}
+                else:
+                    self.slot["steps"].append({"t": "up", "v": v})
+        if len(self.slot["steps"]) >= 64:
+            self.slot["steps"] = self.slot["steps"][:64]
+            self.on_rec()
+        self.draw_steps() # i dotn know how this works rip
+        return True
+    def on_resp(self, dlg, resp):
+        if resp == 10:
+            k = self.k
+            self.app.bg(lambda: self.attempt(lambda: self.app.pad.press(k), "fired"))
+            self.emit_stop_by_name("response")
+            return
+        if resp == Gtk.ResponseType.OK:
+            self.slot["label"] = self.label_entry.get_text()[:16] or f"K{self.k+1}"
+            if len(json.dumps(self.slot)) > 3072:
+                self.app.say("too many steps, max 64")
+                self.emit_stop_by_name("response")
+                return
+            slot, k = self.slot, self.k
+            def go():
+                try:
+                    with self.app.lock:
+                        self.app.set(k, slot)
+                    self.app.slots[k] = slot
+                    GLib.idle_add(self.app.refresh_keys)
+                    self.app.say(f"K{k+1} saved to pad")
+                except Exception as e:
+                    self.app.say(f"save failed: {e}")
+            self.app.bg(go)
+        self.destroy # DIE
+    def attempt(self, fn, ok):
+        try:
+            with self.app.lock:
+                fn()
+            self.app.say(ok)
+        except Exception as e:
+            self.app.say(str(e))
+
+if __name__ == "__main__":
+    sys.exit(App().run(sys.argv))
+    
