@@ -1,0 +1,4 @@
+pyserial>=3.5
+psutil>=5.9
+esptool>=4.7
+# for apt you will need python3-gi and gir1.2-gtk-4.0
