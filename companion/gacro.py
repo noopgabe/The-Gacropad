@@ -67,10 +67,15 @@ class Pad:
         if not r.get("ok"):
             raise PadError(r.get("err", "set failed"))
 
-    def press(self, key):
-        self._cmd({"cmd": "oled", "mode": mode})
+    def oled(self, mode):
+        r = self._cmd({"cmd": "oled", "mode": mode})
         if not r.get("ok"):
             raise PadError(r.get("err", "oled failed"))
+
+    def press(self, key):
+        r = self._cmd({"cmd": "press", "key": key})
+        if not r.get("ok"):
+            raise PadError(r.get("err", "press failed"))
 
     def live (self, clock="", date="", l1="", l2=""):
         self._cmd({"cmd": "live", "clock": clock, "date": date, "l1": l1, "l2": l2})
@@ -83,15 +88,20 @@ class Pad:
 
 def download_bin(url, path, log=print):
     log(f"downloading {url}")
-    urllib.request.urlretrive(url, path)
+    urllib.request.urlretrieve(url, path)
     log(f"saved {path}")
 
 def flash_first(port, bin_path, log=print):
-    # full flash first via rom bootloader. gpio0 to gnd, pulse en. i will add a button on the pcb for this
+    # Full flash over the ROM bootloader, so this needs a MERGED image (bootloader + partition
+    # table + app) written at 0x0. A PlatformIO app-only firmware.bin belongs at 0x10000 and
+    # will not boot from 0x0. gpio0 to gnd, pulse en. i will add a button on the pcb for this
+    with open(bin_path, "rb") as f:
+        if f.read(1) != b"\xe9":
+            raise PadError(f"{bin_path} is not an ESP image (bad magic byte)")
     cmd = [sys.executable, "-m", "esptool", "--chip", "esp32s3",
-           "-p", port, "-b", "460800", "--before", "default_reset"
-           "--after", "hard_reset", "write_flash", "--flash_mode", "dio",
-           "--flash_size", "detect", "0x0", bin_path]
+           "-p", port, "-b", "460800", "--before", "default-reset",
+           "--after", "hard-reset", "write-flash", "--flash-mode", "dio",
+           "--flash-size", "detect", "0x0", bin_path]
     log("$ " + " ".join(cmd))
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     log(p.stdout[-2000:])

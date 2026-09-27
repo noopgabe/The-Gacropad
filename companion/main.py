@@ -3,7 +3,7 @@
 Run /usr/bin/python3 main.py (you will need python3-gi, gir1.2-gtk-4.0, pyserial, psutil, and to flash you will need esptool) to launch the tool.
 
 Recording is done when the window is focused, and it will not listen if it is not focused. This is how it works well on Wayland, and it
-doesn't need root. Global capture soon(tm), but it already works anyway so who gives a shit. You're not gonna get it probably.
+doesn't need root. Global capture soon(tm), but it already works anyway so who gives a freak. You're not gonna get it probably.
 
 It does what you need to. Change the oled, change the macros, push them to the pad. Gets scary complicated, fast.
 
@@ -20,6 +20,8 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Glib, Gtk
 
 import gacro
+
+NO_PORT = "none found oopsies"
 
 MODS = {"Control_L": 0x80, "Shift_L": 0x81, "Alt_L": 0x82, "Super_L": 0x83,
         "Control_R": 0x84, "Shift_R": 0x85, "Alt_R": 0x86, "Super_R": 0x87}
@@ -47,7 +49,7 @@ def keyval_step(keyval):
     if name in MEDIA:
         return ("media", MEDIA[name])
     if name in MODS:
-        return ("key, MODS[name])")
+        return ("key", MODS[name])
     if name in SPECIAL:
         return ("key", SPECIAL[name])
     u = Gdk.keyval_to_unicode(keyval)
@@ -88,6 +90,8 @@ class App(Gtk.Application):
         self.slots = [{"label": f"K{i+1}", "steps": []} for i in range (6)]
         self.live_on = False
         self.live_thread = None
+        self.live_l1 = ""
+        self.live_l2 = ""
 
     def do_activate(self):
         w = Gtk.ApplicationWindow(application=self, title="GacroPad", default_width=520, default_height=560)
@@ -141,6 +145,8 @@ class App(Gtk.Application):
         orow.append(self.oled_combo)
         self.l1 = Gtk.Entry(placeholder_text="live line 1")
         self.l2 = Gtk.Entry(placeholder_text="live line 2")
+        self.l1.connect("changed", self.cache_live_text)
+        self.l2.connect("changed", self.cache_live_text)
         orow.append(self.l1); orow.append(self.l2)
         ob = Gtk.Button(label="apply")
         ob.connect("clicked", self.on_oled)
@@ -176,8 +182,13 @@ class App(Gtk.Application):
     def say(self, msg):
         GLib.idle_add(self.status.set_text, msg)
 
+    def cache_live_text(self, *a):
+        # GTK is main-thread only, so the live thread reads these plain strings.
+        self.live_l1 = self.l1.get_text()
+        self.live_l2 = self.l2.get_text()
+
     def refresh_ports(self):
-        items = [dev for dev, _ in gacro.find_ports()] or ["none found oopsies"]
+        items = [dev for dev, _ in gacro.find_ports()] or [NO_PORT]
         self.port_store.splice(0, self.port_store.get_n_items(), items)
         self.port_combo.set_selected(0)
 
@@ -199,16 +210,16 @@ class App(Gtk.Application):
             self.say("not connected")
             return
         port = dd_text(self.port_combo)
-        if not port or port == "none found":
+        if not port or port == NO_PORT:
             return
         def go():
             try:
                 p = gacro.Pad(port)
                 info = p.ping()
+                slots = [p.get(k) for k in range(6)]
                 with self.lock:
                     self.pad = p
-                    for k in range(6):
-                        self.slots[k] = p.get(k)
+                    self.slots = slots
                 GLib.idle_add(self.refresh_keys)
                 GLib.idle_add(self.conn_btn.set_label, "disconnect")
                 self.say(f"connected fw {info.get('fw', '?')}")
@@ -218,6 +229,11 @@ class App(Gtk.Application):
         # Honestly, being privileged with AI coding has made me realize coding is actually hard.
         # It gets to everyone at some point in time. Look at Google, they just use AI for the entirety of google3. Sad.
     def on_edit(self, btn, k):
+        if not self.pad:
+            self.say("connect FIRST"); return
+        KeyDialog(self, k)
+
+    def on_push_all(self, *a):
         if not self.pad:
             self.say("connect FIRST"); return
         def go():
@@ -234,7 +250,8 @@ class App(Gtk.Application):
         if not self.pad:
             self.say("connect first"); return
         mode = self.oled_modes[self.oled_combo.get_selected()]
-        l1, l2 = self.l1.get_text(), self.l2.get_text()
+        self.cache_live_text()
+        l1, l2 = self.live_l1, self.live_l2
         def go():
             try:
                 with self.lock:
@@ -247,7 +264,10 @@ class App(Gtk.Application):
     def on_live(self, btn):
         self.live_on = btn.get_active()
         btn.set_label(f"background live: {'on' if self.live_on else 'off'}")
-        if self.live_on and not (self.live_thread and self.live_thread.is_alive)():
+        if not self.live_on:
+            return
+        self.cache_live_text()
+        if not (self.live_thread and self.live_thread.is_alive()):
             self.live_thread = threading.Thread(target=self.live_loop, daemon=True)
             self.live_thread.start() 
 
@@ -259,21 +279,23 @@ class App(Gtk.Application):
                 with self.lock:
                     if self.pad:          # Wow, I knew I was bad at dates. But I didn't know I was bad at dates in progamming either.
                         self.pad.live(clock=now.strftime("%H:%M"), date=now.strftime("%Y-%m-%d"), 
-                                      l1=self.l1.get_text() or "GacroPad", l2=self.l2.get_text())
+                                      l1=self.live_l1 or "GacroPad", l2=self.live_l2)
                         if cpu >= 0:
                             self.pad.stats(cpu, mem)
             except Exception as e:
                     self.say(f"live: {e}")
             time.sleep(2)
 
-    def on_flash(self *a):
+    def append_log(self, msg):
+        self.flog.get_buffer().insert_at_cursor(str(msg) + "\n")
+
+    def on_flash(self, *a):
         port = dd_text(self.port_combo)
         url = self.url.get_text().strip() # nekked
-        if not port or port == "none found":
+        if not port or port == NO_PORT:
             return
         def log(msg):
-            buf = self.flog.get_buffer()
-            GLib.idle_add(buf.insert_at_cursor, str(msg) + "\n")
+            GLib.idle_add(self.append_log, str(msg))
         def go():
             try:
                 path = "/tmp/gacropad.bin"
@@ -291,7 +313,7 @@ class KeyDialog(Gtk.Dialog):
     def __init__(self, app, k):
         super().__init__(title=f"key K{k+1}", transient_for=app.get_active_window(), modal=True)
         self.app, self.k = app, k
-        self.slot = json.loads(json.dumps(json.dumps(app.slots[k]))) # how it feels to cook and burn down the kitchen
+        self.slot = json.loads(json.dumps(app.slots[k])) # how it feels to cook and burn down the kitchen
         self.recording = False
         self.last_t = 0
         self.held = {}
@@ -353,6 +375,8 @@ class KeyDialog(Gtk.Dialog):
         self.recording = not self.recording
         self.rec_btn.set_label("stop" if self.recording else "record")
         self.last_t = time.monotonic()
+        if not self.recording:
+            self.held.clear() # keys still down when recording stopped would never get an "up"
 
     def on_key(self, ctl, keyval, keycode, state, pressed):
         if not self.recording:
@@ -397,26 +421,24 @@ class KeyDialog(Gtk.Dialog):
         if resp == 10:
             k = self.k
             self.app.bg(lambda: self.attempt(lambda: self.app.pad.press(k), "fired"))
-            self.emit_stop_by_name("response")
-            return
-        if resp == Gtk.ResponseType.OK:
+        elif resp == Gtk.ResponseType.OK:
             self.slot["label"] = self.label_entry.get_text()[:16] or f"K{self.k+1}"
             if len(json.dumps(self.slot)) > 3072:
                 self.app.say("too many steps, max 64")
-                self.emit_stop_by_name("response")
-                return
-            slot, k = self.slot, self.k
-            def go():
-                try:
-                    with self.app.lock:
-                        self.app.set(k, slot)
-                    self.app.slots[k] = slot
-                    GLib.idle_add(self.app.refresh_keys)
-                    self.app.say(f"K{k+1} saved to pad")
-                except Exception as e:
-                    self.app.say(f"save failed: {e}")
-            self.app.bg(go)
-        self.destroy # DIE
+            else:
+                slot, k = self.slot, self.k
+                def go():
+                    try:
+                        with self.app.lock:
+                            self.app.pad.set(k, slot)
+                        self.app.slots[k] = slot
+                        GLib.idle_add(self.app.refresh_keys)
+                        self.app.say(f"K{k+1} saved to pad")
+                    except Exception as e:
+                        self.app.say(f"save failed: {e}")
+                self.app.bg(go)
+        self.destroy() # love
+
     def attempt(self, fn, ok):
         try:
             with self.app.lock:
