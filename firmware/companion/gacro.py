@@ -39,9 +39,9 @@ class Pad:
         self.ser.close()
 
     def _cmd(self, obj, timeout=3):
+        self.ser.timeout = timeout
         self.ser.reset_input_buffer()
         self.ser.write((json.dumps(obj) + "\n").encode())
-        self.ser.timeout = timeout
         line = self.ser.readline().decode("utf-8", "replace").strip()
         if not line:
             raise PadError("no reply (is the pad connected?)")
@@ -94,7 +94,7 @@ def download_bin(url, path, log=print):
 def flash_first(port, bin_path, log=print):
     # Full flash over the ROM bootloader, so this needs a MERGED image (bootloader + partition
     # table + app) written at 0x0. A PlatformIO app-only firmware.bin belongs at 0x10000 and
-    # will not boot from 0x0. gpio0 to gnd, pulse en. i will add a button on the pcb for this
+    # will not boot from 0x0. There is a button to flash on the board. 
     with open(bin_path, "rb") as f:
         if f.read(1) != b"\xe9":
             raise PadError(f"{bin_path} is not an ESP image (bad magic byte)")

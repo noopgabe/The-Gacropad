@@ -20,9 +20,11 @@
 
 static const uint8_t KEY_PINS[NKEYS] = {10, 9, 8, 7, 6, 40};
 static const uint8_t DEFAULT_RAW[NKEYS] = {0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D}; // F13-F18
+static const char *SLOT_KEYS[NKEYS] = {"m0", "m1", "m2", "m3", "m4", "m5"};
 #define MAX_STEPS 64
 #define MAX_JSON 3072
 #define DEBOUNCE_MS 25
+#define LABEL_MAX 10
 
 USBHIDKeyboard Keyboard;
 USBHIDConsumerControl Consumer;
@@ -40,10 +42,8 @@ String oledMode = "labels";
 int lastKey = -1;
 uint32_t lastKeyAt = 0;
 bool playing = false;
-uint8_t oledAddr = 0x3C;
 
 static bool keyValid(int k) { return k >= 0 && k < NKEYS; }
-static String slotName(int k) { return "m" + String(k); } // flowers bloom in your heart 
 
 static String defaultSlot(int k) {
     char b[128];
@@ -53,24 +53,35 @@ static String defaultSlot(int k) {
     return String(b);
 }
 
-static String loadSlot(int k) {
-    String s = prefs.getString(slotName(k).c_str(), "");
-    if (!s.length()) { s = defaultSlot(k); prefs.putString(slotName(k).c_str(), s); }
-    return s;
-}
-
-static String slotLabel(const String &slotJson) {
+// flowers bloom in your heart
+static String slotLabel(const char *json) {
     JsonDocument d;
-    if (deserializeJson(d, slotJson)) return "?";
+    if (deserializeJson(d, json)) return "?";
     const char *l = d["label"] | "?";
-    return String(l).substring(0, 10);
+    return String(l).substring(0, LABEL_MAX);
 }
 
 // Labels are cached: reading them from NVS every OLED frame is 6 flash lookups per 200ms.
 static String slotLabels[NKEYS];
 
+// getString's String overload has no length cap; the char* one silently drops slots too big to read.
+static String loadSlot(int k) {
+    String s = prefs.getString(SLOT_KEYS[k], "");
+    if (!s.length()) { s = defaultSlot(k); prefs.putString(SLOT_KEYS[k], s); }
+    return s;
+}
+
+// The one place a slot changes: NVS and the label cache move together, or they drift.
+static void setSlot(int k, const char *json) {
+    prefs.putString(SLOT_KEYS[k], json);
+    slotLabels[k] = slotLabel(json);
+}
+
 static void loadLabels() {
-    for (int k = 0; k < NKEYS; k++) slotLabels[k] = slotLabel(loadSlot(k));
+    for (int k = 0; k < NKEYS; k++) {
+        String s = loadSlot(k);
+        slotLabels[k] = slotLabel(s.c_str());
+    }
 }
 
 // Macro playback. The core functionality, how nice. 
@@ -116,8 +127,9 @@ static void playKey(int k) {
     lastKey = k;
     lastKeyAt = millis();
     Serial.printf("{\"ev\":\"play\",\"key\":%d}\n", k);
+    String slot = loadSlot(k);
     JsonDocument d;
-    if (!deserializeJson(d, loadSlot(k)) && d["steps"].is<JsonArray>())
+    if (!deserializeJson(d, slot) && d["steps"].is<JsonArray>())
         playSteps(d["steps"].as<JsonArray>());
     playing = false;
 }
@@ -131,7 +143,7 @@ static void reply(JsonDocument &d) {
     Serial.println();
 }
 
-static void handleLine(const String &line) {
+static void handleLine(const char *line) {
     JsonDocument d;
     JsonDocument out;
     if (deserializeJson(d, line)) { out["ok"] = false; out["err"] = "json"; reply(out); return; }
@@ -153,7 +165,7 @@ static void handleLine(const String &line) {
             String s;
             serializeJson(d["slot"], s);
             if (s.length() > MAX_JSON) { out["ok"] = false; out["err"] = "too big"; }
-            else { prefs.putString(slotName(k).c_str(), s); loadLabels(); out["ok"] = true; }
+            else { setSlot(k, s.c_str()); out["ok"] = true; }
         }
     } else if (!strcmp(cmd, "press")) {
         int k = d["key"] | -1;
@@ -165,10 +177,11 @@ static void handleLine(const String &line) {
             out["ok"] = false; out["err"] = "mode";
         } else { oledMode = m; prefs.putString("oledmode", m); out["ok"] = true; }
     } else if (!strcmp(cmd, "live")) {
-        if (d["clock"].is<const char *>()) live.clock = String((const char *)d["clock"]);
-        if (d["date"].is<const char *>()) live.date = String((const char *)d["date"]);
-        if (d["l1"].is<const char *>()) live.l1 = String((const char *)d["l1"]);
-        if (d["l2"].is<const char *>()) live.l2 = String((const char *)d["l2"]);
+        // Clipped to what the 6x10 font fits, here once, instead of per frame in every draw function.
+        if (d["clock"].is<const char *>()) live.clock = String((const char *)d["clock"]).substring(0, 21);
+        if (d["date"].is<const char *>()) live.date = String((const char *)d["date"]).substring(0, 20);
+        if (d["l1"].is<const char *>()) live.l1 = String((const char *)d["l1"]).substring(0, 21);
+        if (d["l2"].is<const char *>()) live.l2 = String((const char *)d["l2"]).substring(0, 21);
         out["ok"] = true;
     } else if (!strcmp(cmd, "stats")) {
         // Only the stats screen reads cpu/mem; writing them into live.l2 would clobber live mode's line 2.
@@ -176,8 +189,7 @@ static void handleLine(const String &line) {
         if (d["mem"].is<int>()) live.mem = d["mem"];
         out["ok"] = true;
     } else if (!strcmp(cmd, "reset")) {
-        for (int k = 0; k < NKEYS; k++) prefs.putString(slotName(k).c_str(), defaultSlot(k));
-        loadLabels();
+        for (int k = 0; k < NKEYS; k++) { String s = defaultSlot(k); setSlot(k, s.c_str()); }
         oledMode = "labels";
         prefs.putString("oledmode", oledMode);
         out["ok"] = true;
@@ -192,7 +204,7 @@ static void pollSerial() {
         char c = (char)Serial.read();
         if (c == '\n') {
             lineBuf[lineLen] = 0;
-            if (lineLen) handleLine(String(lineBuf));
+            if (lineLen) handleLine(lineBuf);
             lineLen = 0;
         } else if (c != '\r' && lineLen < sizeof(lineBuf) - 1) {
             lineBuf[lineLen++] = c;
@@ -228,33 +240,35 @@ static void drawLabels() {
     for (int k = 0; k < NKEYS; k++) {
         int col = k % 2, row = k /2;
         int x = col * 64, y = 12 + row * 14;
-        String l = String(k + 1) + ":" + slotLabels[k];
+        char l[LABEL_MAX + 4]; // key digits, ':', label, terminator
+        snprintf(l, sizeof l, "%d:%s", k + 1, slotLabels[k].c_str());
         if (k == lastKey && millis() - lastKeyAt < 800) {
             u8g2.drawBox(x, y - 10, 63, 12);
             u8g2.setDrawColor(0);
-            u8g2.drawStr(x + 2, y - 1, l.c_str());
+            u8g2.drawStr(x + 2, y - 1, l);
             u8g2.setDrawColor(1);
         } else {
-            u8g2.drawStr(x + 2, y - 1, l.c_str());
+            u8g2.drawStr(x + 2, y - 1, l);
         }
     }
-    u8g2.drawStr(0, 63, live.l2.substring(0, 21).c_str());
+    u8g2.drawStr(0, 63, live.l2.c_str());
 }
 
 static void drawClock() {
     u8g2.setFont(u8g2_font_logisoso16_tr);
     u8g2.drawStr(22, 32, live.clock.c_str());
     u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(24, 46, live.date.substring(0, 20).c_str());
-    u8g2.drawStr(0, 63, live.l1.substring(0, 21).c_str());
+    u8g2.drawStr(24, 46, live.date.c_str());
+    u8g2.drawStr(0, 63, live.l1.c_str());
 }
 
 static void drawStats() {
     char b[32];
     u8g2.setFont(u8g2_font_6x10_tr);
     u8g2.drawStr(0, 12, "GacroPad stats");
-    snprintf(b, sizeof b, "CPU: %d%% MEM: %d%%", live.cpu, live.mem);
-    u8g2.drawStr(0, 28, live.cpu < 0 ? "CPU: idk (no sync)" : b);
+    if (live.cpu < 0) strcpy(b, "CPU: idk (no sync)");
+    else snprintf(b, sizeof b, "CPU: %d%% MEM: %d%%", live.cpu, live.mem);
+    u8g2.drawStr(0, 28, b);
     snprintf(b, sizeof b, "up %lus", (unsigned long)(millis() / 1000));
     u8g2.drawStr(0, 42, b);
     u8g2.drawStr(0, 63, live.clock.c_str());
@@ -262,8 +276,8 @@ static void drawStats() {
 
 static void drawLive() {
     u8g2.setFont(u8g2_font_6x10_tr);
-    u8g2.drawStr(0, 24, live.l1.substring(0, 21).c_str());
-    u8g2.drawStr(0, 44, live.l2.substring(0, 21).c_str());
+    u8g2.drawStr(0, 24, live.l1.c_str());
+    u8g2.drawStr(0, 44, live.l2.c_str());
     u8g2.drawStr(0, 63, live.clock.c_str());
 }
 
@@ -293,7 +307,7 @@ void setup() {
     prefs.begin("gacro", false); // that wasnt a funny joke i apologize sincerely
     oledMode = prefs.getString("oledmode", "labels");
     loadLabels();
-    oledAddr = i2cProbe();
+    const uint8_t oledAddr = i2cProbe();
     u8g2.setI2CAddress(oledAddr * 2);
     u8g2.begin();
     USB.productName("The GacroPad");
@@ -310,7 +324,8 @@ void loop() {
     pollSerial();
     pollKeys();
     static uint32_t lastDraw = 0;
-    if (millis() - lastDraw > 200) { lastDraw = millis(); drawOled(); }
+    const uint32_t now = millis();
+    if (now - lastDraw > 200) { lastDraw = now; drawOled(); }
     delay(2);
 }
 

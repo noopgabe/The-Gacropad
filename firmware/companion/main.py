@@ -8,6 +8,7 @@ doesn't need root. Global capture soon(tm), but it already works anyway so who g
 It does what you need to. Change the oled, change the macros, push them to the pad. Gets scary complicated, fast.
 
 Works on Linux. WinUI port eventually. MacOS port maybe. I don't think it's gonna work out for MacOS in the first place anyway."""
+import copy
 import datetime
 import json
 import sys
@@ -283,7 +284,7 @@ class App(Gtk.Application):
                         if cpu >= 0:
                             self.pad.stats(cpu, mem)
             except Exception as e:
-                    self.say(f"live: {e}")
+                self.say(f"live: {e}")
             time.sleep(2)
 
     def append_log(self, msg):
@@ -313,7 +314,7 @@ class KeyDialog(Gtk.Dialog):
     def __init__(self, app, k):
         super().__init__(title=f"key K{k+1}", transient_for=app.get_active_window(), modal=True)
         self.app, self.k = app, k
-        self.slot = json.loads(json.dumps(app.slots[k])) # how it feels to cook and burn down the kitchen
+        self.slot = copy.deepcopy(app.slots[k]) # how it feels to cook and burn down the kitchen
         self.recording = False
         self.last_t = 0
         self.held = {}
